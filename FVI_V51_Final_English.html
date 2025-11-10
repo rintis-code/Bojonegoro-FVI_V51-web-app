@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FVI V5.1 - Bojonegoro Flood Vulnerability Analysis</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
+        h1 { text-align: center; color: #333; }
+        .control-panel { background-color: #f4f4f4; padding: 20px; border-bottom: 2px solid #ddd; text-align: center; }
+        .control-panel p { margin: 5px 0; }
+        .file-input-group { margin: 10px 0; }
+        #file-input, #shp-input { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        .action-buttons { margin-top: 15px; }
+        #process-button, #download-button, #load-shp-button { padding: 10px 20px; font-size: 16px; color: white; border: none; border-radius: 5px; cursor: pointer; transition: background-color 0.3s; margin: 0 5px; }
+        #process-button { background-color: #007bff; }
+        #process-button:hover { background-color: #0056b3; }
+        #download-button { background-color: #28a745; display: none; }
+        #download-button:hover { background-color: #218838; }
+        #load-shp-button { background-color: #6c757d; display: none; }
+        #load-shp-button:hover { background-color: #5a6268; }
+        #status { margin-top: 15px; font-weight: bold; color: #d9534f; }
+        #status.success { color: #5cb85c; }
+        #map { flex-grow: 1; width: 100%; min-height: 400px; }
+        .info.legend { background-color: white; padding: 10px; line-height: 1.5; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.2); }
+        .info.legend i { width: 18px; height: 18px; float: left; margin-right: 8px; opacity: 0.9; }
+        .table-container { padding: 20px; background-color: #f8f9fa; border-top: 2px solid #ddd; max-height: 300px; overflow-y: auto; }
+        .data-table { width: 100%; border-collapse: collapse; margin: 0 auto; box-shadow: 0 2px 3px rgba(0,0,0,0.1); }
+        .data-table th, .data-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        .data-table th { background-color: #007bff; color: white; font-weight: bold; position: sticky; top: 0; z-index: 10; }
+        .data-table tr:nth-child(even) { background-color: #f2f2f2; }
+        .data-table tr:hover { background-color: #e9ecef; }
+    </style>
+</head>
+<body>
+    <div class="control-panel">
+        <h1>FVI V5.1 - Bojonegoro Flood Vulnerability Analysis</h1>
+        <p><b>1. FVI Data:</b> Select Excel file containing <b>Latitude</b> and <b>Longitude</b> columns.</p>
+        <div class="file-input-group">
+            <input type="file" id="file-input" accept=".xlsx, .xls">
+        </div>
+        <p><b>2. Map Overlay (Optional):</b> Select ZIP file containing the SHP map (.shp, .shx, .dbf, .prj).</p>
+        <div class="file-input-group">
+            <input type="file" id="shp-input" accept=".zip">
+        </div>
+        <div class="action-buttons">
+            <button id="process-button">Process Data & Display Map</button>
+            <button id="load-shp-button">Load SHP Overlay</button>
+            <button id="download-button">Download Results (Excel)</button>
+        </div>
+        <div id="status"></div>
+    </div>
+    <div id="map"></div>
+    <div class="table-container">
+        <table id="data-table" class="data-table">
+            <thead>
+                <tr>
+                    <th>Sub-district Name</th>
+                    <th>PVI (Normalized)</th>
+                    <th>Social Vulnerability (Normalized)</th>
+                    <th>Flood Occurrence (Normalized)</th>
+                    <th>FVI (Final)</th>
+                    <th>Category</th>
+                </tr>
+            </thead>
+            <tbody id="table-body">
+            </tbody>
+        </table>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
+    <script>
+        const warnaKategori = { 'Very Low': '#28a745', 'Low': '#8BC34A', 'Medium': '#FFEB3B', 'High': '#FF9800', 'Very High': '#F44336' };
+        const fileInput = document.getElementById('file-input'); const shpInput = document.getElementById('shp-input'); const processButton = document.getElementById('process-button'); const loadShpButton = document.getElementById('load-shp-button'); const downloadButton = document.getElementById('download-button'); const statusDiv = document.getElementById('status'); const tableBody = document.getElementById('table-body');
+        let map = null; let processedDataForDownload = null; let shpLayer = null;
+        function updateStatus(message, isSuccess = false) { statusDiv.textContent = message; statusDiv.className = isSuccess ? 'success' : ''; }
+        function normalize(data, key, isInverse = false) {
+            const values = data.map(d => d[key]).filter(v => !isNaN(v));
+            if (values.length === 0) return data.map(d => ({ ...d, [`${key}_norm`]: 0 }));
+            const min = Math.min(...values), max = Math.max(...values);
+            return data.map(d => {
+                if (isNaN(d[key])) return { ...d, [`${key}_norm`]: 0 };
+                let value = d[key];
+                if (isInverse) { value = max - value + min; }
+                const norm = (max - min === 0) ? 0.5 : (value - min) / (max - min);
+                return { ...d, [`${key}_norm`]: norm };
+            });
+        }
+        function processData(rawData) {
+            let data = rawData.map(item => ({ ...item, 'District Name': String(item['District Name']).trim() }));
+            
+            // --- FIX 1: Remove duplicates based on sub-district name ---
+            const uniqueDataMap = new Map();
+            data.forEach(item => {
+                const name = item['District Name'];
+                if (!uniqueDataMap.has(name)) {
+                    uniqueDataMap.set(name, item);
+                } else {
+                    console.warn(`WARNING: Duplicate found for "${name}". Only the first row will be used.`);
+                }
+            });
+            let uniqueData = Array.from(uniqueDataMap.values());
+            
+            // Updated to use numeric values directly from the Excel file
+            uniqueData = normalize(uniqueData, 'Slope (%)'); 
+            uniqueData = normalize(uniqueData, 'River Distance (km)', true); 
+            uniqueData = normalize(uniqueData, 'Road Density (km/km²)');
+            uniqueData = normalize(uniqueData, 'Population Density (jiwa/km²)'); 
+            uniqueData = normalize(uniqueData, 'Population Poverty (%)'); 
+            uniqueData = normalize(uniqueData, 'Primary Education (%)');
+            uniqueData = normalize(uniqueData, 'Inundation Depth (m)'); 
+            uniqueData = normalize(uniqueData, 'Inundation Area (ha)'); 
+            uniqueData = normalize(uniqueData, 'Flood frequency (10 thn)');
+            
+            uniqueData = uniqueData.map(item => {
+                const pvi = (item['Slope (%)_norm'] + item['River Distance (km)_norm'] + item['Road Density (km/km²)_norm']) / 3;
+                const social = (item['Population Density (jiwa/km²)_norm'] + item['Population Poverty (%)_norm'] + item['Primary Education (%)_norm']) / 3;
+                const flood = (item['Inundation Depth (m)_norm'] + item['Inundation Area (ha)_norm'] + item['Flood frequency (10 thn)_norm']) / 3;
+                return { ...item, PVI: pvi, Social_Vulnerability: social, Flood_Occurrence: flood };
+            });
+            
+            // --- FIX 2: Filter data that does not have valid coordinates or essential data ---
+            let dataWithCoords = uniqueData.filter(item => {
+                const lat = item['Latitude'];
+                const lon = item['Longitude'];
+                if (isNaN(lat) || isNaN(lon)) {
+                    console.error(`ERROR: Invalid coordinates for "${item['District Name']}". This row will be skipped.`);
+                    return false;
+                }
+                // Check if all essential numeric columns are empty
+                const requiredNumericCols = ['Slope (%)', 'River Distance (km)', 'Road Density (km/km²)', 'Population Density (jiwa/km²)', 'Population Poverty (%)', 'Primary Education (%)', 'Inundation Depth (m)', 'Inundation Area (ha)', 'Flood frequency (10 thn)'];
+                const hasValidData = requiredNumericCols.some(col => !isNaN(item[col]) && item[col] !== null && item[col] !== '');
+                if (!hasValidData) {
+                    console.error(`ERROR: No numeric data found for "${item['District Name']}". This row will be skipped.`);
+                    return false;
+                }
+                return true;
+            }).map(item => {
+                item.koordinat = [item['Latitude'], item['Longitude']];
+                return item;
+            });
+
+            if (dataWithCoords.length < uniqueData.length) {
+                const skipped = uniqueData.length - dataWithCoords.length;
+                updateStatus(`Warning: ${skipped} data rows were skipped due to duplication or empty data. Check Console (F12) for details.`, true);
+            }
+
+            const pviValues = dataWithCoords.map(d => d.PVI); const socialValues = dataWithCoords.map(d => d.Social_Vulnerability); const floodValues = dataWithCoords.map(d => d.Flood_Occurrence);
+            const pviMin = Math.min(...pviValues), pviMax = Math.max(...pviValues); const socialMin = Math.min(...socialValues), socialMax = Math.max(...socialValues); const floodMin = Math.min(...floodValues), floodMax = Math.max(...floodValues);
+            const processedData = dataWithCoords.map(item => {
+                const pvi_norm = (pviMax - pviMin === 0) ? 0.5 : (item.PVI - pviMin) / (pviMax - pviMin);
+                const social_norm = (socialMax - socialMin === 0) ? 0.5 : (item.Social_Vulnerability - socialMin) / (socialMax - socialMin);
+                const flood_norm = (floodMax - floodMin === 0) ? 0.5 : (item.Flood_Occurrence - floodMin) / (floodMax - floodMin);
+                const fvi = (pvi_norm + social_norm + flood_norm) / 3;
+                let kategori; if (fvi <= 0.2) kategori = 'Very Low'; else if (fvi <= 0.4) kategori = 'Low'; else if (fvi <= 0.6) kategori = 'Medium'; else if (fvi <= 0.8) kategori = 'High'; else kategori = 'Very High';
+                return { ...item, pvi_norm, social_norm, flood_norm, FVI: fvi, Kategori: kategori };
+            });
+            return processedData;
+        }
+        function renderMap(data) {
+            if (map) map.remove(); map = L.map('map').setView([-7.25, 111.90], 10); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>' }).addTo(map);
+            const markerGroup = L.layerGroup().addTo(map);
+            data.forEach(item => {
+                const marker = L.circleMarker(item.koordinat, { radius: 10, fillColor: warnaKategori[item.Kategori], color: '#000', weight: 1, opacity: 1, fillOpacity: 0.8 });
+                const popupContent = `<b>Sub-district: ${item['District Name']}</b><hr><b>FVI:</b> ${item.FVI.toFixed(4)}<br><b>Category:</b> ${item.Kategori}<br><b>PVI:</b> ${item.pvi_norm.toFixed(4)}<br><b>Social:</b> ${item.social_norm.toFixed(4)}<br><b>Flood:</b> ${item.flood_norm.toFixed(4)}`;
+                marker.bindPopup(popupContent); markerGroup.addLayer(marker);
+            });
+            const legend = L.control({ position: 'bottomright' });
+            legend.onAdd = function (map) { let div = L.DomUtil.create('div', 'info legend'); let labels = ['<h4>Vulnerability Level</h4>']; for (let kategori in warnaKategori) { labels.push(`<i style="background:${warnaKategori[kategori]}"></i> ${kategori}`); } div.innerHTML = labels.join('<br>'); return div; };
+            legend.addTo(map);
+            if (data.length > 0 && typeof markerGroup.getBounds === 'function' && markerGroup.getLayers().length > 0) { map.fitBounds(markerGroup.getBounds()); }
+        }
+        function renderTable(data) {
+            tableBody.innerHTML = '';
+            data.forEach(item => {
+                const row = document.createElement('tr');
+                row.innerHTML = `<td>${item['District Name']}</td><td>${item.pvi_norm.toFixed(4)}</td><td>${item.social_norm.toFixed(4)}</td><td>${item.flood_norm.toFixed(4)}</td><td>${item.FVI.toFixed(4)}</td><td style="color: ${warnaKategori[item.Kategori]}; font-weight: bold;">${item.Kategori}</td>`;
+                tableBody.appendChild(row);
+            });
+        }
+        function downloadExcel() {
+            if (!processedDataForDownload) { updateStatus('No data to download. Please process the Excel file first.'); return; }
+            const ws_data = processedDataForDownload.map(item => { const { koordinat, ...restOfItem } = item; return { ...restOfItem, 'Latitude': koordinat ? koordinat[0] : null, 'Longitude': koordinat ? koordinat[1] : null }; });
+            const wb = XLSX.utils.book_new(); const ws = XLSX.utils.json_to_sheet(ws_data); XLSX.utils.book_append_sheet(wb, ws, "FVI Results");
+            const fileName = "FVI_Results_Bojonegoro.xlsx"; XLSX.writeFile(wb, fileName);
+            updateStatus(`File '${fileName}' downloaded successfully.`, true);
+        }
+        function loadShpFile() {
+            const file = shpInput.files[0];
+            if (!file) { updateStatus('Error: Please select a ZIP SHP file first.'); return; }
+            if (!map) { updateStatus('Error: Map not yet initialized. Please process the Excel data first.'); return; }
+            updateStatus('Reading SHP file...');
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    if (shpLayer) { map.removeLayer(shpLayer); }
+                    shp(e.target.result).then(function(geojson) {
+                        shpLayer = L.geoJSON(geojson, {
+                            style: { color: "blue", weight: 2, opacity: 0.8, fillOpacity: 0.1 },
+                            onEachFeature: function (feature, layer) {
+                                if (feature.properties && feature.properties.NAME) {
+                                    const popupContent = `<b>Area Name:</b><br>${feature.properties.NAME}`;
+                                    layer.bindPopup(popupContent);
+                                }
+                            }
+                        }).addTo(map);
+                        updateStatus('SHP overlay loaded successfully. Click a polygon to see its area name.', true);
+                    });
+                } catch (error) { console.error(error); updateStatus('Error: Failed to process SHP file. Ensure the ZIP file is valid.'); }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+        processButton.addEventListener('click', function() {
+            const file = fileInput.files[0]; if (!file) { updateStatus('Error: Please select an Excel file.'); return; }
+            updateStatus('Reading file...'); const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result); const workbook = XLSX.read(data, { type: 'array' }); const firstSheet = workbook.Sheets[workbook.SheetNames[0]]; const jsonData = XLSX.utils.sheet_to_json(firstSheet);
+                    if (jsonData.length === 0) { updateStatus('Error: Excel file is empty.'); return; }
+                    const firstRowKeys = Object.keys(jsonData[0]).map(key => String(key).trim());
+                    const requiredCols = ['District Name', 'Slope (%)', 'River Distance (km)', 'Road Density (km/km²)', 'Population Density (jiwa/km²)', 'Population Poverty (%)', 'Primary Education (%)', 'Inundation Depth (m)', 'Inundation Area (ha)', 'Flood frequency (10 thn)', 'Latitude', 'Longitude'];
+                    const missingCols = requiredCols.filter(col => !firstRowKeys.includes(col));
+                    if (missingCols.length > 0) { updateStatus(`Error: Column not found: ${missingCols.join(', ')}`); return; }
+                    updateStatus('Processing data...'); const processedData = processData(jsonData); processedDataForDownload = processedData;
+                    updateStatus('Rendering map...'); renderMap(processedData);
+                    renderTable(processedData);
+                    updateStatus(`Success! Map and table with ${processedData.length} sub-districts have been created.`, true);
+                    downloadButton.style.display = 'inline-block'; loadShpButton.style.display = 'inline-block';
+                } catch (error) { console.error(error); updateStatus('Error: Failed to process file. Details: ' + error.message); }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+        downloadButton.addEventListener('click', downloadExcel);
+        loadShpButton.addEventListener('click', loadShpFile);
+    </script>
+</body>
+</html>
